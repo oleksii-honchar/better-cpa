@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexPromptCacheKeyFromClient_FromPayload(t *testing.T) {

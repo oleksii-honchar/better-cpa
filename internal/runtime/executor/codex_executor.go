@@ -1454,7 +1454,7 @@ func codexPromptCacheKeyFromHeaders(ctx context.Context) (string, string) {
 }
 
 func codexPromptCacheKeyFromHeader(headers http.Header) (string, string) {
-	for _, name := range []string{"X-Session-ID", "Session_id", "session_id", "Conversation_id", "conversation_id"} {
+	for _, name := range []string{"X-Session-ID", "Session-Id", "Session_id", "session_id", "Conversation_id", "conversation_id"} {
 		if value := strings.TrimSpace(headers.Get(name)); value != "" {
 			return value, "header." + name
 		}
@@ -1589,7 +1589,7 @@ func applyCodexContinuityBody(rawJSON []byte, continuity codexContinuity) []byte
 
 func applyCodexContinuityHeaders(headers http.Header, continuity codexContinuity) {
 	if continuity.Key != "" {
-		headers.Set("Session_id", continuity.Key)
+		headers.Set("Session-Id", continuity.Key)
 	}
 }
 
@@ -1682,7 +1682,7 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 		return
 	}
 
-	setCodexSessionHeaderCasePreserved(headers, "Session_id", state.promptCacheKey)
+	setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
 	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
 		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
 	}
@@ -1796,7 +1796,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
+		misc.EnsureHeader(r.Header, ginHeaders, "Session-Id", uuid.NewString())
 	}
 
 	if stream {
