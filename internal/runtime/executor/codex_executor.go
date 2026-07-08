@@ -775,7 +775,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
@@ -1060,7 +1059,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
@@ -1416,6 +1414,185 @@ type codexIdentityReplacement struct {
 	confused string
 }
 
+func codexPromptCacheKeyFromClient(ctx context.Context, req cliproxyexecutor.Request, rawJSON []byte) (string, string) {
+	if key, source := codexPromptCacheKeyFromJSON(req.Payload, "payload"); key != "" {
+		return key, source
+	}
+	if key, source := codexPromptCacheKeyFromJSON(rawJSON, "body"); key != "" {
+		return key, source
+	}
+	return codexPromptCacheKeyFromHeaders(ctx)
+}
+
+func codexPromptCacheKeyFromJSON(payload []byte, prefix string) (string, string) {
+	if len(payload) == 0 {
+		return "", ""
+	}
+	for _, path := range []string{
+		"prompt_cache_key",
+		"promptCacheKey",
+		"providerOptions.openai.promptCacheKey",
+		"provider_options.openai.prompt_cache_key",
+		"provider_options.openai.promptCacheKey",
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			return value, prefix + "." + path
+		}
+	}
+	return "", ""
+}
+
+func codexPromptCacheKeyFromHeaders(ctx context.Context) (string, string) {
+	if ctx == nil {
+		return "", ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return "", ""
+	}
+	return codexPromptCacheKeyFromHeader(ginCtx.Request.Header)
+}
+
+func codexPromptCacheKeyFromHeader(headers http.Header) (string, string) {
+	for _, name := range []string{"X-Session-ID", "Session_id", "session_id", "Conversation_id", "conversation_id"} {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return value, "header." + name
+		}
+	}
+	return "", ""
+}
+
+func normalizeCodexPreviousResponseIDForPromptCache(_ context.Context, from sdktranslator.Format, rawJSON []byte) []byte {
+	if from != "openai-response" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) == "" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String()) == "" {
+		return rawJSON
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if !codexInputLooksLikeFullTranscript(input) {
+		return rawJSON
+	}
+	updated, errDelete := sjson.DeleteBytes(rawJSON, "previous_response_id")
+	if errDelete != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func codexInputLooksLikeFullTranscript(input gjson.Result) bool {
+	if !input.Exists() || !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "function_call", "custom_tool_call":
+			return true
+		case "message":
+			if strings.TrimSpace(item.Get("role").String()) == "assistant" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeCodexDeveloperCurrentTimeForPromptCache(_ context.Context, from sdktranslator.Format, rawJSON []byte) []byte {
+	if from != "openai-response" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String()) == "" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "input.0.role").String()) != "developer" {
+		return rawJSON
+	}
+	content := gjson.GetBytes(rawJSON, "input.0.content")
+	if !content.Exists() {
+		return rawJSON
+	}
+	normalized, changed := normalizeCodexCurrentTimeLine(content.String())
+	if !changed {
+		return rawJSON
+	}
+	updated, errSet := sjson.SetBytes(rawJSON, "input.0.content", normalized)
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func normalizeCodexCurrentTimeLine(content string) (string, bool) {
+	const label = "Current time: "
+	index := strings.Index(content, label)
+	if index < 0 {
+		return content, false
+	}
+	valueStart := index + len(label)
+	valueEnd := len(content)
+	if newlineIndex := strings.IndexByte(content[valueStart:], '\n'); newlineIndex >= 0 {
+		valueEnd = valueStart + newlineIndex
+	}
+	rawValue := strings.TrimSpace(content[valueStart:valueEnd])
+	if !looksLikeISODatePrefix(rawValue) {
+		return content, false
+	}
+	normalizedLine := label + rawValue[:10] + "T00:00:00.000Z"
+	if content[index:valueEnd] == normalizedLine {
+		return content, false
+	}
+	return content[:index] + normalizedLine + content[valueEnd:], true
+}
+
+func looksLikeISODatePrefix(value string) bool {
+	if len(value) < len("2006-01-02") {
+		return false
+	}
+	for index := 0; index < len("2006-01-02"); index++ {
+		switch index {
+		case 4, 7:
+			if value[index] != '-' {
+				return false
+			}
+		default:
+			if value[index] < '0' || value[index] > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type codexContinuity struct {
+	Key string
+}
+
+func resolveCodexContinuity(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) codexContinuity {
+	if key, _ := codexPromptCacheKeyFromClient(ctx, req, nil); key != "" {
+		return codexContinuity{Key: key}
+	}
+	if auth != nil && strings.TrimSpace(auth.ID) != "" {
+		return codexContinuity{Key: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:continuity:"+strings.TrimSpace(auth.ID))).String()}
+	}
+	return codexContinuity{Key: uuid.New().String()}
+}
+
+func applyCodexContinuityBody(rawJSON []byte, continuity codexContinuity) []byte {
+	if continuity.Key != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", continuity.Key)
+	}
+	return rawJSON
+}
+
+func applyCodexContinuityHeaders(headers http.Header, continuity codexContinuity) {
+	if continuity.Key != "" {
+		headers.Set("Session_id", continuity.Key)
+	}
+}
+
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, userPayload []byte, rawJSON []byte) (*http.Request, []byte, codexIdentityConfuseState, error) {
 	var cache helps.CodexCache
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
@@ -1427,12 +1604,13 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 			cache = cached
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
-		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
-		if promptCacheKey.Exists() {
-			cache.ID = promptCacheKey.String()
+		if promptCacheKey, _ := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
+			cache.ID = promptCacheKey
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAI) {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+		if promptCacheKey, _ := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
+			cache.ID = promptCacheKey
+		} else if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
 			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
 		}
 	}
@@ -1445,13 +1623,21 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
+
+	continuity := codexContinuity{}
+	if cache.ID != "" {
+		continuity = codexContinuity{Key: cache.ID}
+	}
+
+	rawJSON = applyCodexContinuityBody(rawJSON, continuity)
+	rawJSON = normalizeCodexPreviousResponseIDForPromptCache(ctx, from, rawJSON)
+	rawJSON = normalizeCodexDeveloperCurrentTimeForPromptCache(ctx, from, rawJSON)
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
 	}
-	if cache.ID != "" {
-		httpReq.Header.Set("Session_id", cache.ID)
-	}
+	applyCodexContinuityHeaders(httpReq.Header, continuity)
 	return httpReq, rawJSON, identityState, nil
 }
 
