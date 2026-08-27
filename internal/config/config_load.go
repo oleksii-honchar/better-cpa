@@ -78,6 +78,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
+	// Cutover default (spec §10.1): force the stable per-session prompt_cache_key override
+	// unless explicitly disabled. Rollback = flip codex.force-stable-prompt-cache-key off.
+	cfg.Codex.ForceStablePromptCacheKey = true
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.

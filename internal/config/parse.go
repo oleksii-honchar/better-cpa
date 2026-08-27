@@ -37,6 +37,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
+	// Cutover default (spec §10.1): force the stable per-session prompt_cache_key override
+	// unless explicitly disabled. Rollback = flip codex.force-stable-prompt-cache-key off.
+	cfg.Codex.ForceStablePromptCacheKey = true
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)

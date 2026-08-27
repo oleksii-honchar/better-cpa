@@ -40,6 +40,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -141,6 +142,128 @@ func TestContinuityWire_WebSocket_ExactlyOneSessionHeaderEqualsContinuityKey(t *
 	assertNoHeaderValue(t, headers, "Session-Id")
 	assertNoHeaderValue(t, headers, "Session_id")
 	assertNoSessionHeaderVariants(t, headers, "session_id")
+}
+
+// TestContinuityWire_HTTP_ForceStableKey_DerivedWhenIdentityPresent: wire-level
+// (cacheHelper + applyCodexHeaders pipeline). With ForceStablePromptCacheKey on
+// and execution_session_id metadata, a random per-request client key is
+// overridden by the derived ProviderSessionUUID key in both the outbound body
+// and the canonical Session-Id header. Before the override existed (Task 2),
+// this assertion failed: the outbound key equaled the client key (the
+// zero-reuse bug).
+func TestContinuityWire_HTTP_ForceStableKey_DerivedWhenIdentityPresent(t *testing.T) {
+	ctx := newCodexCacheHelperContext("", nil)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","prompt_cache_key":"11111111-2222-4333-8444-555555555555","input":[]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "ctx:v1:execution-root",
+		},
+	}
+	expectedKey := helps.ProviderSessionUUID("codex", req.Metadata)
+	if expectedKey == "" {
+		t.Fatalf("test setup: expected a non-empty derived key")
+	}
+	cfg := &config.Config{Codex: config.CodexConfig{ForceStablePromptCacheKey: true}}
+
+	body, httpReq := cacheHelperRequestWithConfig(t, ctx, cfg, sdktranslator.FromString("openai-response"), req, []byte(`{"model":"gpt-5.5","stream":true}`))
+	applyCodexHeaders(httpReq, nil, "oauth-token", true, nil)
+
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want derived %q", got, expectedKey)
+	}
+	assertExactlyOneHeaderValue(t, httpReq.Header, "Session-Id", expectedKey)
+	assertNoHeaderValue(t, httpReq.Header, "Session_id")
+	assertNoHeaderValue(t, httpReq.Header, "session_id")
+	assertNoSessionHeaderVariants(t, httpReq.Header, "Session-Id")
+}
+
+// TestContinuityWire_HTTP_ForceStableKeyOff_EchoesInboundKeyUnchanged: wire-level
+// negative case. The same identity metadata is present, but with the flag off the
+// inbound client key is echoed unchanged — the config gate, not the identity
+// alone, drives the override (legacy preservation).
+func TestContinuityWire_HTTP_ForceStableKeyOff_EchoesInboundKeyUnchanged(t *testing.T) {
+	ctx := newCodexCacheHelperContext("", nil)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","prompt_cache_key":"inbound-echo-key","input":[]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "ctx:v1:execution-root",
+		},
+	}
+
+	body, httpReq := cacheHelperRequestWithConfig(t, ctx, &config.Config{}, sdktranslator.FromString("openai-response"), req, []byte(`{"model":"gpt-5.5","stream":true}`))
+	applyCodexHeaders(httpReq, nil, "oauth-token", true, nil)
+
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "inbound-echo-key" {
+		t.Fatalf("prompt_cache_key = %q, want inbound-echo-key (flag off)", got)
+	}
+	assertExactlyOneHeaderValue(t, httpReq.Header, "Session-Id", "inbound-echo-key")
+	assertNoHeaderValue(t, httpReq.Header, "Session_id")
+	assertNoHeaderValue(t, httpReq.Header, "session_id")
+}
+
+// TestContinuityWire_WebSocket_ForceStableKey_DerivedWhenIdentityPresent:
+// wire-level WS (applyCodexPromptCacheHeadersWithContext + the websocket header
+// pipeline). With the flag on + metadata, the derived key lands in the outbound
+// body prompt_cache_key and the single lowercase session_id header. Before the
+// override existed (Task 3), this assertion failed: the client key was echoed.
+func TestContinuityWire_WebSocket_ForceStableKey_DerivedWhenIdentityPresent(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{ForceStablePromptCacheKey: true}}
+	req := wsOpenAIResponsesCacheRequest("22222222-3333-4333-8333-666666666666", "ctx:v1:execution-root")
+	expectedKey := helps.ProviderSessionUUID("codex", req.Metadata)
+	if expectedKey == "" {
+		t.Fatalf("test setup: expected a non-empty derived key")
+	}
+
+	body, headers, err := applyCodexPromptCacheHeadersWithContext(context.Background(), cfg, sdktranslator.FormatOpenAIResponse, req, []byte(`{"model":"gpt-5.5","stream":true}`))
+	if err != nil {
+		t.Fatalf("applyCodexPromptCacheHeadersWithContext error: %v", err)
+	}
+	headers = applyCodexWebsocketHeaders(context.Background(), headers, nil, "oauth-token", nil)
+	applyModelHeaderOverrides(headers, "gpt-5.5")
+
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want derived %q", got, expectedKey)
+	}
+	assertExactlyOneHeaderValue(t, headers, "session_id", expectedKey)
+	assertNoHeaderValue(t, headers, "Session-Id")
+	assertNoHeaderValue(t, headers, "Session_id")
+	assertNoSessionHeaderVariants(t, headers, "session_id")
+}
+
+// TestContinuityWire_WebSocket_ForceStableKey_SameAffinityGroup_IdenticalKey:
+// two WS turns in the same session-affinity group (same execution_session_id,
+// different random client keys) resolve to the identical derived outbound key
+// and session_id header. Before the override existed, the two client keys were
+// echoed verbatim and differed — cross-turn reuse was impossible.
+func TestContinuityWire_WebSocket_ForceStableKey_SameAffinityGroup_IdenticalKey(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{ForceStablePromptCacheKey: true}}
+	req1 := wsOpenAIResponsesCacheRequest("aaaaaaaa-1111-4111-8111-111111111111", "ctx:v1:same-ws-affinity")
+	req2 := wsOpenAIResponsesCacheRequest("bbbbbbbb-2222-4222-8222-222222222222", "ctx:v1:same-ws-affinity")
+	expectedKey := helps.ProviderSessionUUID("codex", req1.Metadata)
+	if expectedKey == "" {
+		t.Fatalf("test setup: expected a non-empty derived key")
+	}
+
+	body1, headers1, err1 := applyCodexPromptCacheHeadersWithContext(context.Background(), cfg, sdktranslator.FormatOpenAIResponse, req1, []byte(`{"model":"gpt-5.5","stream":true}`))
+	if err1 != nil {
+		t.Fatalf("turn 1 applyCodexPromptCacheHeadersWithContext error: %v", err1)
+	}
+	body2, headers2, err2 := applyCodexPromptCacheHeadersWithContext(context.Background(), cfg, sdktranslator.FormatOpenAIResponse, req2, []byte(`{"model":"gpt-5.5","stream":true}`))
+	if err2 != nil {
+		t.Fatalf("turn 2 applyCodexPromptCacheHeadersWithContext error: %v", err2)
+	}
+
+	if got := gjson.GetBytes(body1, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("turn 1 prompt_cache_key = %q, want %q", got, expectedKey)
+	}
+	if got := gjson.GetBytes(body2, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("turn 2 prompt_cache_key = %q, want %q", got, expectedKey)
+	}
+	assertExactlyOneHeaderValue(t, headers1, "session_id", expectedKey)
+	assertExactlyOneHeaderValue(t, headers2, "session_id", expectedKey)
+	assertNoSessionHeaderVariants(t, headers2, "session_id")
 }
 
 func TestContinuityWire_HTTP_PreloadedHeadersPresent(t *testing.T) {

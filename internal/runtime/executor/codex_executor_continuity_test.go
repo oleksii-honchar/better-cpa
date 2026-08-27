@@ -29,8 +29,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestPortedFork_ContinuityResolveChain_PayloadKeyWinsOverMetadataAndAPIKey(t *testing.T) {
-	// pr-3141 resolveCodexContinuity step 1: payload prompt_cache_key wins.
+func TestPortedFork_ContinuityResolveChain_PayloadKeyPolicy_OpenAIResponses(t *testing.T) {
+	// pr-3141 resolveCodexContinuity step 1, updated for the
+	// ForceStablePromptCacheKey policy (spec §4): on openai-response the payload
+	// prompt_cache_key wins only when the flag is off (or no stable session
+	// identity resolves). With the flag on + execution_session_id metadata, the
+	// derived ProviderSessionUUID key wins over the payload key (zero-reuse fix).
 	ctx := newCodexCacheHelperContext("api-key-a", nil)
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
@@ -39,14 +43,33 @@ func TestPortedFork_ContinuityResolveChain_PayloadKeyWinsOverMetadataAndAPIKey(t
 			cliproxyexecutor.ExecutionSessionMetadataKey: "metadata-session",
 		},
 	}
-	body, httpReq := cacheHelperRequest(t, ctx, sdktranslator.FromString("openai"), req, []byte(`{"model":"gpt-5.5","stream":true}`))
+	expectedKey := helps.ProviderSessionUUID("codex", req.Metadata)
+	if expectedKey == "" {
+		t.Fatalf("test setup: expected a non-empty derived key")
+	}
+	from := sdktranslator.FromString("openai-response")
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true}`)
 
-	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "payload-key" {
-		t.Fatalf("prompt_cache_key = %q, want payload-key", got)
-	}
-	if got := httpReq.Header.Get("Session-Id"); got != "payload-key" {
-		t.Fatalf("Session-Id = %q, want payload-key", got)
-	}
+	t.Run("flag_off_payload_key_wins", func(t *testing.T) {
+		body, httpReq := cacheHelperRequestWithConfig(t, ctx, &config.Config{}, from, req, rawJSON)
+		if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "payload-key" {
+			t.Fatalf("prompt_cache_key = %q, want payload-key (flag off)", got)
+		}
+		if got := httpReq.Header.Get("Session-Id"); got != "payload-key" {
+			t.Fatalf("Session-Id = %q, want payload-key (flag off)", got)
+		}
+	})
+
+	t.Run("flag_on_identity_derived_key_wins", func(t *testing.T) {
+		cfg := &config.Config{Codex: config.CodexConfig{ForceStablePromptCacheKey: true}}
+		body, httpReq := cacheHelperRequestWithConfig(t, ctx, cfg, from, req, rawJSON)
+		if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+			t.Fatalf("prompt_cache_key = %q, want derived %q", got, expectedKey)
+		}
+		if got := httpReq.Header.Get("Session-Id"); got != expectedKey {
+			t.Fatalf("Session-Id = %q, want derived %q", got, expectedKey)
+		}
+	})
 }
 
 func TestPortedFork_ContinuityResolveChain_MetadataBeatsAPIKeyFallback(t *testing.T) {

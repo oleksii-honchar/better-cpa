@@ -120,6 +120,14 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		if promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
 		}
+		// ForceStablePromptCacheKey: when enabled and a stable session identity
+		// resolves, override the client-supplied per-request key (opencode mints a
+		// fresh random key per request, which kills cross-turn cache reuse).
+		if e.cfg != nil && e.cfg.Codex.ForceStablePromptCacheKey {
+			if stableKey := helps.ProviderSessionUUID("codex", req.Metadata); stableKey != "" {
+				cache.ID = stableKey
+			}
+		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAI) {
 		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
 			cache.ID = strings.TrimSpace(promptCacheKey.String())

@@ -19,11 +19,11 @@ import (
 )
 
 func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
-	body, headers, _ := applyCodexPromptCacheHeadersWithContext(context.Background(), from, req, rawJSON)
+	body, headers, _ := applyCodexPromptCacheHeadersWithContext(context.Background(), nil, from, req, rawJSON)
 	return body, headers
 }
 
-func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, headerSets ...http.Header) ([]byte, http.Header, error) {
+func applyCodexPromptCacheHeadersWithContext(ctx context.Context, cfg *config.Config, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, headerSets ...http.Header) ([]byte, http.Header, error) {
 	headers := http.Header{}
 	if len(rawJSON) == 0 {
 		return rawJSON, headers, nil
@@ -47,8 +47,17 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 			cache = cached
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
-		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
+		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
+		if promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
+		}
+		// ForceStablePromptCacheKey: when enabled and a stable session identity
+		// resolves, override the client-supplied per-request key (opencode mints a
+		// fresh random key per request, which kills cross-turn cache reuse).
+		if cfg != nil && cfg.Codex.ForceStablePromptCacheKey {
+			if stableKey := helps.ProviderSessionUUID("codex", req.Metadata); stableKey != "" {
+				cache.ID = stableKey
+			}
 		}
 	}
 	if cache.ID == "" {

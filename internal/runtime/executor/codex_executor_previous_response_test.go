@@ -60,6 +60,11 @@ func portedExecuteRequest(serverURL string, payload []byte) (cliproxyexecutor.Re
 
 func TestPortedFork_PreviousResponseID_DroppedForFullTranscript(t *testing.T) {
 	// b50dba3c TestNormalizePreviousResponseID_DropsForFullTranscript
+	// Flag-off preservation: NewCodexExecutor(&config.Config{}) leaves
+	// ForceStablePromptCacheKey at its zero value (false) and no
+	// execution_session_id metadata is present, so the client-supplied
+	// prompt_cache_key "pc-abc" is preserved verbatim. Preservation is now
+	// conditional on the flag/identity, not unconditional (spec §4).
 	server, gotBody := newPortedExecuteServer(t)
 	executor := NewCodexExecutor(&config.Config{})
 	req, opts, auth := portedExecuteRequest(server.URL, []byte(`{
@@ -78,8 +83,8 @@ func TestPortedFork_PreviousResponseID_DroppedForFullTranscript(t *testing.T) {
 	if got := gjson.GetBytes(*gotBody, "previous_response_id"); got.Exists() {
 		t.Fatalf("previous_response_id should be dropped for full transcript; body=%s", string(*gotBody))
 	}
-	if !gjson.GetBytes(*gotBody, "prompt_cache_key").Exists() {
-		t.Fatalf("prompt_cache_key should be preserved; body=%s", string(*gotBody))
+	if got := gjson.GetBytes(*gotBody, "prompt_cache_key").String(); got != "pc-abc" {
+		t.Fatalf("prompt_cache_key = %q, want pc-abc (flag-off preservation); body=%s", got, string(*gotBody))
 	}
 }
 

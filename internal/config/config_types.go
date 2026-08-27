@@ -158,6 +158,14 @@ type CodexConfig struct {
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	// ForceStablePromptCacheKey overrides any client-supplied per-request prompt_cache_key
+	// on openai-response paths with a stable per-session key derived from the resolved
+	// session identity when one exists. Without this, clients that send a random
+	// prompt_cache_key per request never reuse the upstream prompt cache. Default true
+	// (cutover default per spec §10.1); flip to false for instant rollback or run an old
+	// image. Stateless requests without a session identity still fall back to the
+	// client-supplied key.
+	ForceStablePromptCacheKey bool `yaml:"force-stable-prompt-cache-key" json:"force-stable-prompt-cache-key"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }

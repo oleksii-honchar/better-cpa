@@ -2,9 +2,9 @@
 type: concept
 title: "Codex Cache Continuity Mechanism"
 createdAt: "2026-07-08T22:00:00Z"
-updatedAt: "2026-07-08T22:00:00Z"
+updatedAt: "2026-08-25T10:38:25Z"
 tags: [better-cpa, codex, caching, continuity]
-see_also: ["adrs/0001-session-header-casing.adr.md", "concepts/0001-codex-session-header-architecture.concept.md"]
+see_also: ["adrs/0001-session-header-casing.adr.md", "concepts/0001-codex-session-header-architecture.concept.md", "adrs/0002-continuity-key-override.adr.md"]
 deprecated:
   date: null
   reason: null
@@ -57,3 +57,26 @@ The resolved continuity key is applied in two ways:
 | Claude Code | `X-Claude-Code-Session-Id` | Priority 2 (metadata) |
 | Codex CLI | `session-id` (stable per session) | Priority 1 (header) |
 | Direct API (no headers) | None | Priority 3 (auth hash) — stable |
+
+## Post-sync confirmed mechanism (2026-08-25)
+
+On the `v7.2.141` sync base the fork's own 3-priority `resolveCodexContinuity` chain is
+**superseded** by upstream `f43aad76` (canonical `Session-Id` + preloads) + `cacheHelper`,
+plus the fork-local override from **ADR-010**.
+
+**Confirmed root cause:** `cacheHelper` (`codex_executor_request.go`) and
+`applyCodexPromptCacheHeadersWithContext` (`codex_websockets_request.go`) treat a payload
+`prompt_cache_key` as authoritative. opencode mints a random v4 UUID per request (43/43
+unique keys, zero reuse in one conversation) — so the upstream cache partition changes
+every turn. Cross-turn reuse is impossible.
+
+**New resolve policy (config-gated):**
+
+1. `codex.force-stable-prompt-cache-key` enabled **and** `ProviderSessionUUID("codex",
+   req.Metadata)` resolves (i.e. `execution_session_id` present) → outbound
+   `prompt_cache_key` = **derived stable key** (overrides client key), HTTP and WS.
+2. No stable identity → client key preserved (stateless fallback).
+3. Flag off → upstream behavior exactly (client key wins when present).
+
+The client-supplied key is no longer forwarded verbatim when the flag is on and identity
+exists. See [[adrs/0002-continuity-key-override]].

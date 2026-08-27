@@ -17,6 +17,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -1384,6 +1385,132 @@ func TestApplyCodexPromptCacheHeadersClaudeRejectsBareUserID(t *testing.T) {
 	}
 	if got := headers.Get("Conversation_id"); got != "" {
 		t.Fatalf("bare metadata.user_id must not create websocket Conversation_id, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ForceStablePromptCacheKey resolve policy on the WebSocket openai-response
+// branch (spec §4/§10, plan Task 3) — mirrors the HTTP cacheHelper policy.
+// ---------------------------------------------------------------------------
+
+// wsOpenAIResponsesCacheRequest is a synthetic opencode-style websocket request:
+// a random per-request client prompt_cache_key plus optional execution_session_id
+// metadata.
+func wsOpenAIResponsesCacheRequest(clientKey string, executionSessionID string) cliproxyexecutor.Request {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","prompt_cache_key":"` + clientKey + `","input":[]}`),
+	}
+	if executionSessionID != "" {
+		req.Metadata = map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: executionSessionID,
+		}
+	}
+	return req
+}
+
+// TestApplyCodexPromptCacheHeadersWS_OpenAIResponses_ForceStableKey_OverridesClientKey:
+// WS flag on + execution_session_id metadata + random client key -> the outbound body
+// prompt_cache_key AND the lowercase session_id header are the derived
+// ProviderSessionUUID key, NOT the client key (the zero-reuse bug fix).
+func TestApplyCodexPromptCacheHeadersWS_OpenAIResponses_ForceStableKey_OverridesClientKey(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{ForceStablePromptCacheKey: true}}
+	req := wsOpenAIResponsesCacheRequest("11111111-2222-4333-8444-555555555555", "ctx:v1:execution-root")
+	expectedKey := helps.ProviderSessionUUID("codex", req.Metadata)
+	if expectedKey == "" {
+		t.Fatalf("test setup: expected a non-empty derived key")
+	}
+
+	body, headers, err := applyCodexPromptCacheHeadersWithContext(context.Background(), cfg, sdktranslator.FormatOpenAIResponse, req, []byte(`{"model":"gpt-5-codex"}`))
+	if err != nil {
+		t.Fatalf("applyCodexPromptCacheHeadersWithContext error: %v", err)
+	}
+
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want derived %q; body=%s", got, expectedKey, string(body))
+	}
+	if got := headers["session_id"]; len(got) != 1 || got[0] != expectedKey {
+		t.Fatalf("session_id = %#v, want [%q]", got, expectedKey)
+	}
+	if got := headers.Get("Conversation_id"); got != expectedKey {
+		t.Fatalf("Conversation_id = %q, want %q", got, expectedKey)
+	}
+}
+
+// TestApplyCodexPromptCacheHeadersWS_OpenAIResponses_ForceStableKeyOff_PreservesClientKey:
+// WS flag off -> exactly today's behavior: client-supplied key wins verbatim in both
+// the body and the session_id header.
+func TestApplyCodexPromptCacheHeadersWS_OpenAIResponses_ForceStableKeyOff_PreservesClientKey(t *testing.T) {
+	req := wsOpenAIResponsesCacheRequest("client-random-key", "ctx:v1:execution-root")
+	expectedKey := helps.ProviderSessionUUID("codex", req.Metadata)
+	if expectedKey == "" {
+		t.Fatalf("test setup: expected a non-empty derived key")
+	}
+
+	body, headers, err := applyCodexPromptCacheHeadersWithContext(context.Background(), &config.Config{}, sdktranslator.FormatOpenAIResponse, req, []byte(`{"model":"gpt-5-codex"}`))
+	if err != nil {
+		t.Fatalf("applyCodexPromptCacheHeadersWithContext error: %v", err)
+	}
+
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "client-random-key" {
+		t.Fatalf("prompt_cache_key = %q, want client key %q", got, "client-random-key")
+	}
+	if got := headers["session_id"]; len(got) != 1 || got[0] != "client-random-key" {
+		t.Fatalf("session_id = %#v, want [client-random-key]", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "client-random-key" {
+		t.Fatalf("Conversation_id = %q, want client-random-key", got)
+	}
+}
+
+// TestApplyCodexPromptCacheHeadersWS_OpenAIResponses_ForceStableKey_NoMetadata_FallsBackToClientKey:
+// WS flag on but no session identity -> stateless fallback to the client-supplied key.
+func TestApplyCodexPromptCacheHeadersWS_OpenAIResponses_ForceStableKey_NoMetadata_FallsBackToClientKey(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{ForceStablePromptCacheKey: true}}
+	req := wsOpenAIResponsesCacheRequest("client-random-key", "")
+
+	body, headers, err := applyCodexPromptCacheHeadersWithContext(context.Background(), cfg, sdktranslator.FormatOpenAIResponse, req, []byte(`{"model":"gpt-5-codex"}`))
+	if err != nil {
+		t.Fatalf("applyCodexPromptCacheHeadersWithContext error: %v", err)
+	}
+
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "client-random-key" {
+		t.Fatalf("prompt_cache_key = %q, want client key %q", got, "client-random-key")
+	}
+	if got := headers["session_id"]; len(got) != 1 || got[0] != "client-random-key" {
+		t.Fatalf("session_id = %#v, want [client-random-key]", got)
+	}
+}
+
+// TestApplyCodexPromptCacheHeadersWS_CanonicalSessionIDCasing asserts the WS canonical
+// casing contract: exactly one lowercase session_id header, and no other casing
+// (Session-Id/Session_id/underscore variants) on the WS path.
+func TestApplyCodexPromptCacheHeadersWS_CanonicalSessionIDCasing(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{ForceStablePromptCacheKey: true}}
+	req := wsOpenAIResponsesCacheRequest("client-random-key", "ctx:v1:canonical-casing")
+
+	_, headers, err := applyCodexPromptCacheHeadersWithContext(context.Background(), cfg, sdktranslator.FormatOpenAIResponse, req, []byte(`{"model":"gpt-5-codex"}`))
+	if err != nil {
+		t.Fatalf("applyCodexPromptCacheHeadersWithContext error: %v", err)
+	}
+
+	var sessionKeys []string
+	for key := range headers {
+		if strings.EqualFold(key, "session_id") || strings.EqualFold(key, "session-id") {
+			sessionKeys = append(sessionKeys, key)
+		}
+	}
+	if len(sessionKeys) != 1 || sessionKeys[0] != "session_id" {
+		t.Fatalf("session header keys = %#v, want exactly [session_id]; headers=%#v", sessionKeys, headers)
+	}
+	if got := headers["session_id"]; len(got) != 1 {
+		t.Fatalf("session_id values = %#v, want exactly one value", got)
+	}
+	if got := headers.Get("Session-Id"); got != "" {
+		t.Fatalf("Session-Id = %q, want empty", got)
+	}
+	if got := headers.Get("Session_id"); got != "" {
+		t.Fatalf("Session_id = %q, want empty", got)
 	}
 }
 

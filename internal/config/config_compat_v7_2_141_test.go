@@ -27,9 +27,8 @@ func readFixture(t *testing.T) []byte {
 	return raw
 }
 
-// collectTopLevelYAMLKeys returns every top-level YAML key accepted by Config,
-// including keys from the inlined SDKConfig.
-func collectTopLevelYAMLKeys(t *testing.T) map[string]bool {
+// collectYAMLKeys returns every YAML key accepted by typ, following inlined structs.
+func collectYAMLKeys(t *testing.T, typ reflect.Type) map[string]bool {
 	t.Helper()
 	keys := make(map[string]bool)
 	var walk func(reflect.Type)
@@ -50,8 +49,21 @@ func collectTopLevelYAMLKeys(t *testing.T) map[string]bool {
 			}
 		}
 	}
-	walk(reflect.TypeOf(Config{}))
+	walk(typ)
 	return keys
+}
+
+// collectTopLevelYAMLKeys returns every top-level YAML key accepted by Config,
+// including keys from the inlined SDKConfig.
+func collectTopLevelYAMLKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	return collectYAMLKeys(t, reflect.TypeOf(Config{}))
+}
+
+// collectCodexYAMLKeys returns every YAML key accepted by CodexConfig.
+func collectCodexYAMLKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	return collectYAMLKeys(t, reflect.TypeOf(CodexConfig{}))
 }
 
 // TestCPAProductionConfig_LoadsWithoutErrorOnV7_2_141 is the config-load validation:
@@ -128,5 +140,39 @@ func TestCPAProductionConfig_KeyValuesBehaveAsIntended(t *testing.T) {
 	}
 	if len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "sk-cliproxy" {
 		t.Errorf("api-keys = %v, want [sk-cliproxy]", cfg.APIKeys)
+	}
+}
+
+// TestCPAProductionConfig_ForceStablePromptCacheKeyKnown is the schema-drift guard for the
+// new codex.force-stable-prompt-cache-key key: the CodexConfig struct must accept the key
+// on the v7.2.141 schema, otherwise the YAML key would be silently ignored by yaml.Unmarshal.
+func TestCPAProductionConfig_ForceStablePromptCacheKeyKnown(t *testing.T) {
+	keys := collectCodexYAMLKeys(t)
+	if !keys["force-stable-prompt-cache-key"] {
+		t.Fatalf("codex.force-stable-prompt-cache-key not a known key in CodexConfig (schema drift)")
+	}
+}
+
+// TestCPAProductionConfig_ForceStablePromptCacheKey_DefaultsTrue asserts the cutover
+// default: the production fixture does not set the key, so parsing it must yield true.
+func TestCPAProductionConfig_ForceStablePromptCacheKey_DefaultsTrue(t *testing.T) {
+	cfg, errParse := ParseConfigBytes(readFixture(t))
+	if errParse != nil {
+		t.Fatalf("parse fixture: %v", errParse)
+	}
+	if !cfg.Codex.ForceStablePromptCacheKey {
+		t.Errorf("absent codex.force-stable-prompt-cache-key: default = false, want true")
+	}
+}
+
+// TestCPAProductionConfig_ForceStablePromptCacheKey_ExplicitFalseHonored asserts the
+// instant-rollback path stays honored under the compat schema.
+func TestCPAProductionConfig_ForceStablePromptCacheKey_ExplicitFalseHonored(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte("codex:\n  force-stable-prompt-cache-key: false\n"))
+	if errParse != nil {
+		t.Fatalf("parse inline config: %v", errParse)
+	}
+	if cfg.Codex.ForceStablePromptCacheKey {
+		t.Errorf("explicit codex.force-stable-prompt-cache-key: false not honored; got true")
 	}
 }

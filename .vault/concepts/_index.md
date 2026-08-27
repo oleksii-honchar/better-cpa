@@ -14,4 +14,4 @@ Key domain concepts and mental models for the better-cpa proxy and its caching a
 
 - [[concepts/0001-codex-session-header-architecture|Codex Session Header Architecture]] — How CPA forwards session identifiers to the upstream Codex API for prompt caching. Header standardization, continuity key resolution chain, affected code paths. (2026-07-08)
 
-- [[concepts/0002-codex-cache-continuity-mechanism|Codex Cache Continuity Mechanism]] — How CPA maintains stable cache keys across multiple conversation turns via 3-priority fallback chain. Client compatibility matrix included. (2026-07-08)
+- [[concepts/0002-codex-cache-continuity-mechanism|Codex Cache Continuity Mechanism]] — How CPA maintains stable cache keys across multiple conversation turns via a 3-priority fallback chain. Updated with the post-sync confirmed mechanism (payload-key-wins → config-gated override, ADR-010). (2026-07-08, updated 2026-08-25)

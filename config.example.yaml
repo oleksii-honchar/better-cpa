@@ -255,6 +255,13 @@ codex:
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
   # into standard user messages for non-Codex upstream protocols.
   optimize-multi-agent-v2: false
+  # When true, override any client-supplied per-request prompt_cache_key on openai-response
+  # paths with a stable per-session key derived from the resolved session identity
+  # (execution_session_id). Clients that send a fresh random prompt_cache_key per request
+  # otherwise never reuse the upstream prompt cache. Requests without a session identity
+  # keep the client-supplied key. Default: true (cutover default); flip to false for
+  # instant rollback or run an older image.
+  force-stable-prompt-cache-key: true
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:

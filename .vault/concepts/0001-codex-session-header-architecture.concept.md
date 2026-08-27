@@ -2,7 +2,7 @@
 type: concept
 title: "Codex Session Header Architecture"
 createdAt: "2026-07-08T22:00:00Z"
-updatedAt: "2026-07-08T22:00:00Z"
+updatedAt: "2026-08-25T10:38:25Z"
 tags: [better-cpa, codex, caching, headers, architecture]
 see_also: ["adrs/0001-session-header-casing.adr.md"]
 deprecated:
@@ -57,3 +57,13 @@ The resolved key is applied as:
 ### Out of Scope
 
 The Claude executor (`claude_executor.go`) uses its own session header (`X-Claude-Code-Session-Id`) and has a separate TTL issue (Issue #3398). It is NOT part of the Codex session header architecture.
+
+## Post-sync status (2026-08-25)
+
+On the `v7.2.141` sync base (ADR-011) the fork's own continuity header implementation
+(`applyCodexContinuityHeaders`, `codexPromptCacheKeyFromHeader` on the old single-file
+`codex_executor.go`) was **replaced by upstream `f43aad76`** — canonical `Session-Id`,
+preloads, and split executor files (`codex_executor_request.go`,
+`codex_executor_execute.go`, `codex_executor_auth.go`). Historically documented fork paths
+above are retained for reference; canonical `Session-Id` is now upstream-maintained, and the
+continuity key override lives in ADR-010.
